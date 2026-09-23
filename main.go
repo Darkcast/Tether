@@ -15,6 +15,9 @@ var (
 	LPORT         = "31337"
 	BPORT         = "8888"
 	NOCLI         = ""
+	SESSLOG       = ""
+	SNI           = ""
+	PROXY         = ""
 )
 
 func main() {

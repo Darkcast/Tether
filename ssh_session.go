@@ -38,8 +38,12 @@ func createSSHSessionHandler(shell string) ssh.Handler {
 				}()
 			}
 
-			cmd.Stdout = s
-			cmd.Stderr = s
+			logFile := openSessionLog(s, "exec")
+			if logFile != nil {
+				defer logFile.Close()
+			}
+			cmd.Stdout = teeSessionOutput(s, logFile)
+			cmd.Stderr = teeSessionOutput(s, logFile)
 
 			done := make(chan error, 1)
 			go func() { done <- cmd.Run() }()

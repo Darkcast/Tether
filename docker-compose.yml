@@ -1,0 +1,60 @@
+version: "3.9"
+
+# Test topology:
+#   catcher  — bind mode (-l), SSH server on :31337, reverse shell lands on :8888
+#   target   — reverse mode, dials catcher:31337, exposes its shell via catcher:8888
+#
+# Run:
+#   docker compose up --build
+#
+# Get a shell into the target container (from host):
+#   docker compose exec catcher \
+#     ssh -p 8888 -o StrictHostKeyChecking=no reverse@127.0.0.1
+#   password: testpass123
+#
+# Or expose catcher's port 8888 to the host and connect directly:
+#   ssh -p 8888 reverse@127.0.0.1   (password: testpass123)
+#
+# Optional SOCKS5 proxy test — uncomment the proxy service and set:
+#   command: ["-v", "catcher"] -> command: ["-v", "--", "catcher"]
+#   Then rebuild with PROXY=socks5://proxy:1080 baked in, or set HTTPS_PROXY env.
+
+services:
+  catcher:
+    build:
+      context: .
+      args:
+        PASS: testpass123
+    command: ["-l", "-v", "-p", "31337"]
+    ports:
+      - "31337:31337"   # target dials in here
+      - "8888:8888"     # reverse shell access from host
+    networks:
+      - tether
+
+  target:
+    build:
+      context: .
+      args:
+        PASS: testpass123
+    command: ["-v", "catcher"]
+    depends_on:
+      - catcher
+    networks:
+      - tether
+
+  # Uncomment to test proxy-aware dial (SOCKS5 path in dial.go):
+  # proxy:
+  #   image: serjs/go-socks5-proxy
+  #   environment:
+  #     - PROXY_USER=user
+  #     - PROXY_PASSWORD=pass
+  #   networks:
+  #     - tether
+  #
+  # Then rebuild target with:
+  #   PROXY=socks5://user:pass@proxy:1080 docker compose up --build
+
+networks:
+  tether:
+    driver: bridge

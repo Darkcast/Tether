@@ -1,3 +1,5 @@
+//go:build !windows
+
 package main
 
 import (
@@ -32,12 +34,17 @@ func createPty(s ssh.Session, shell string) {
 		}
 	}()
 
+	logFile := openSessionLog(s, "pty")
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
 	go func() {
 		io.Copy(f, s)
 		s.Close()
 	}()
 	go func() {
-		io.Copy(s, f)
+		io.Copy(teeSessionOutput(s, logFile), f)
 		s.Close()
 	}()
 

