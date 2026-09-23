@@ -29,6 +29,18 @@ ifdef NOCLI
 LDFLAGS := $(LDFLAGS) -X 'main.NOCLI=$(NOCLI)'
 endif
 
+ifdef SESSLOG
+LDFLAGS := $(LDFLAGS) -X 'main.SESSLOG=$(SESSLOG)'
+endif
+
+ifdef SNI
+LDFLAGS := $(LDFLAGS) -X 'main.SNI=$(SNI)'
+endif
+
+ifdef PROXY
+LDFLAGS := $(LDFLAGS) -X 'main.PROXY=$(PROXY)'
+endif
+
 # GOFLAGS keeps builds reproducible/offline once deps are vendored or cached
 GO ?= go
 BUILD = CGO_ENABLED=0 $(GO) build -trimpath -ldflags="$(LDFLAGS) -s -w"
